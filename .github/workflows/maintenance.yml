@@ -1,0 +1,302 @@
+name: 🔧 Maintenance Tasks
+
+on:
+  schedule:
+    - cron: '0 0 * * 0'  # Weekly on Sunday at midnight UTC
+    - cron: '0 6 1 * *'  # Monthly on 1st at 6 AM UTC
+  workflow_dispatch:
+    inputs:
+      maintenance_type:
+        description: 'Maintenance Type'
+        required: true
+        type: choice
+        options: ['dependencies', 'security', 'cleanup', 'all']
+        default: 'all'
+
+jobs:
+  dependency-updates:
+    name: Update Dependencies
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.maintenance_type == 'dependencies' || github.event.inputs.maintenance_type == 'all' || github.event_name == 'schedule' }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          
+      - name: Update Dependencies
+        run: |
+          npm update
+          npm audit fix --force || echo "Some vulnerabilities couldn't be auto-fixed"
+          
+      - name: Update Notion Client
+        run: |
+          npm install @notionhq/client@latest
+          
+      - name: Run Tests After Update
+        run: npm test
+        
+      - name: Generate Dependency Report
+        run: |
+          npm ls --json > dependency-report.json
+          npm outdated --json > outdated-report.json || echo "No outdated packages"
+          
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: 'chore: update dependencies and fix security vulnerabilities'
+          title: 'chore: automated dependency updates'
+          body: |
+            ## 🔧 Automated Dependency Updates
+            
+            This PR contains automated dependency updates and security fixes.
+            
+            ### Changes:
+            - Updated npm dependencies to latest versions
+            - Fixed security vulnerabilities with `npm audit fix`
+            - Updated @notionhq/client to latest version
+            
+            ### Testing:
+            - ✅ All tests pass after updates
+            - ✅ Security audit completed
+            
+            **Note:** This PR was created automatically by the maintenance workflow.
+          branch: maintenance/dependency-updates
+          delete-branch: true
+
+  security-maintenance:
+    name: Security Maintenance
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.maintenance_type == 'security' || github.event.inputs.maintenance_type == 'all' || github.event_name == 'schedule' }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          
+      - name: Install Dependencies
+        run: npm ci
+        
+      - name: Run Security Audit
+        run: |
+          npm audit --audit-level high --json > security-audit.json || echo "Security issues found"
+          
+      - name: Scan for Secrets
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: main
+          head: HEAD
+          
+      - name: License Compatibility Check
+        run: |
+          npm run license:check || echo "License check script not available"
+          
+      - name: Generate Security Report
+        run: |
+          echo "## 🔐 Security Maintenance Report" > security-report.md
+          echo "**Date:** $(date)" >> security-report.md
+          echo "" >> security-report.md
+          echo "### Security Audit Results:" >> security-report.md
+          if [ -f security-audit.json ]; then
+            node -e "
+              const audit = JSON.parse(require('fs').readFileSync('security-audit.json', 'utf8'));
+              console.log('- Total vulnerabilities:', audit.metadata?.vulnerabilities?.total || 0);
+              console.log('- High severity:', audit.metadata?.vulnerabilities?.high || 0);
+              console.log('- Moderate severity:', audit.metadata?.vulnerabilities?.moderate || 0);
+            " >> security-report.md
+          fi
+          
+      - name: Upload Security Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-maintenance-report
+          path: |
+            security-audit.json
+            security-report.md
+          retention-days: 90
+
+  cleanup-artifacts:
+    name: Cleanup Old Artifacts
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.maintenance_type == 'cleanup' || github.event.inputs.maintenance_type == 'all' || github.event_name == 'schedule' }}
+    steps:
+      - name: Delete Old Workflow Runs
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          retain_days: 30
+          keep_minimum_runs: 10
+          
+      - name: Delete Old Artifacts
+        uses: jimschubert/delete-artifacts-action@v1
+        with:
+          log_level: 'warn'
+          min_bytes: '0'
+          max_bytes: '500000000'  # 500MB
+
+  database-maintenance:
+    name: Database Schema Maintenance
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.maintenance_type == 'all' || github.event_name == 'schedule' }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          
+      - name: Install Dependencies
+        run: npm ci
+        
+      - name: Validate All Schemas
+        run: npm run validate:all
+        
+      - name: Check Schema Migrations
+        run: npm run schema:check-migrations
+        
+      - name: Update Schema Documentation
+        run: npm run docs:schemas:update
+        
+      - name: Generate Schema Changelog
+        run: npm run schema:changelog
+        
+      - name: Upload Schema Reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: schema-maintenance-report
+          path: |
+            docs/generated/schemas/
+            schema-changelog.md
+          retention-days: 30
+
+  performance-monitoring:
+    name: Performance Monitoring
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'schedule' }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          
+      - name: Install Dependencies
+        run: npm ci
+        
+      - name: Run Performance Tests
+        run: npm run test:performance
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TEST_TOKEN }}
+          
+      - name: Generate Performance Report
+        run: |
+          echo "## 📊 Performance Monitoring Report" > performance-report.md
+          echo "**Date:** $(date)" >> performance-report.md
+          echo "" >> performance-report.md
+          npm run performance:summary >> performance-report.md
+          
+      - name: Upload Performance Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-monitoring-report
+          path: |
+            performance-results/
+            performance-report.md
+          retention-days: 90
+
+  health-check:
+    name: System Health Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          
+      - name: Install Dependencies
+        run: npm ci
+        
+      - name: Check API Endpoints
+        run: npm run healthcheck:api
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TEST_TOKEN }}
+          
+      - name: Validate Configurations
+        run: npm run validate:configs
+        
+      - name: Check Documentation Links
+        run: npm run docs:check-links
+        
+      - name: Generate Health Report
+        run: |
+          echo "## 🏥 System Health Check Report" > health-report.md
+          echo "**Date:** $(date)" >> health-report.md
+          echo "**Repository:** ${{ github.repository }}" >> health-report.md
+          echo "" >> health-report.md
+          npm run health:summary >> health-report.md
+          
+      - name: Create Issue on Health Check Failure
+        uses: actions/github-script@v7
+        if: failure()
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '🚨 System Health Check Failed',
+              body: `## System Health Check Failed
+              
+              **Date:** ${new Date().toISOString()}
+              **Workflow Run:** ${context.runId}
+              
+              The automated health check has detected issues that require attention.
+              
+              Please review the workflow logs and take appropriate action.
+              
+              This issue was created automatically by the maintenance workflow.`,
+              labels: ['maintenance', 'health-check', 'urgent']
+            })
+
+  maintenance-summary:
+    name: Maintenance Summary
+    runs-on: ubuntu-latest
+    needs: [dependency-updates, security-maintenance, cleanup-artifacts, database-maintenance, performance-monitoring, health-check]
+    if: always()
+    steps:
+      - name: Create Maintenance Summary
+        run: |
+          echo "## 🔧 Maintenance Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Date:** $(date)" >> $GITHUB_STEP_SUMMARY
+          echo "**Maintenance Type:** ${{ github.event.inputs.maintenance_type || 'scheduled' }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Task Results:" >> $GITHUB_STEP_SUMMARY
+          echo "- Dependency Updates: ${{ needs.dependency-updates.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Security Maintenance: ${{ needs.security-maintenance.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Cleanup Artifacts: ${{ needs.cleanup-artifacts.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Database Maintenance: ${{ needs.database-maintenance.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Performance Monitoring: ${{ needs.performance-monitoring.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Health Check: ${{ needs.health-check.result }}" >> $GITHUB_STEP_SUMMARY

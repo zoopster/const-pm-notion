@@ -1,0 +1,303 @@
+name: 🏗️ Deploy Construction Template
+
+on:
+  workflow_dispatch:
+    inputs:
+      notion_token:
+        description: 'Notion Integration Token'
+        required: true
+        type: string
+      client_name:
+        description: 'Client/Company Name'
+        required: true
+        type: string
+      deployment_tier:
+        description: 'Template Tier'
+        required: true
+        type: choice
+        options: ['starter', 'professional', 'enterprise']
+        default: 'professional'
+      include_sample_data:
+        description: 'Include Sample Data'
+        type: boolean
+        default: true
+      custom_domain:
+        description: 'Custom Domain (optional)'
+        required: false
+        type: string
+      integration_config:
+        description: 'Integration Configuration JSON'
+        required: false
+        type: string
+
+env:
+  NODE_VERSION: '18'
+  DEPLOYMENT_REGION: 'us-east-1'
+
+jobs:
+  pre-flight:
+    name: 🔍 Pre-flight Checks
+    runs-on: ubuntu-latest
+    outputs:
+      config-valid: ${{ steps.validate.outputs.valid }}
+      estimated-cost: ${{ steps.estimate.outputs.cost }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          
+      - name: Install Dependencies
+        run: npm ci --production=false
+        
+      - name: Validate Input Configuration
+        id: validate
+        run: |
+          npm run validate:inputs -- \
+            --tier="${{ inputs.deployment_tier }}" \
+            --client="${{ inputs.client_name }}" \
+            --token="${{ inputs.notion_token }}"
+          echo "valid=true" >> $GITHUB_OUTPUT
+          
+      - name: Estimate Deployment Cost
+        id: estimate
+        run: |
+          cost=$(npm run estimate:cost -- --tier="${{ inputs.deployment_tier }}")
+          echo "cost=$cost" >> $GITHUB_OUTPUT
+          echo "💰 Estimated API calls: $cost"
+          
+      - name: Test Notion API Connection
+        run: |
+          npm run test:connection
+        env:
+          NOTION_TOKEN: ${{ inputs.notion_token }}
+
+  security-scan:
+    name: 🔐 Security Scan
+    runs-on: ubuntu-latest
+    needs: pre-flight
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        
+      - name: Run Security Audit
+        run: npm audit --audit-level moderate
+        
+      - name: Scan for Secrets
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: main
+          head: HEAD
+          
+      - name: CodeQL Analysis
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript
+          
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+
+  build-template:
+    name: 🏗️ Build Template
+    runs-on: ubuntu-latest
+    needs: [pre-flight, security-scan]
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          
+      - name: Install Dependencies
+        run: npm ci
+        
+      - name: Build Template Configuration
+        run: |
+          npm run build:template -- \
+            --tier="${{ inputs.deployment_tier }}" \
+            --client="${{ inputs.client_name }}" \
+            --sample-data="${{ inputs.include_sample_data }}"
+            
+      - name: Validate Template Schema
+        run: npm run validate:schema
+        
+      - name: Generate Documentation
+        run: npm run docs:generate
+        
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: template-build
+          path: |
+            dist/
+            docs/generated/
+          retention-days: 7
+
+  deploy-template:
+    name: 🚀 Deploy to Notion
+    runs-on: ubuntu-latest
+    needs: build-template
+    environment: production
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          
+      - name: Install Dependencies
+        run: npm ci --production
+        
+      - name: Download Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: template-build
+          path: ./dist
+          
+      - name: Deploy Construction Template
+        id: deploy
+        run: |
+          deployment_result=$(npm run deploy:construction 2>&1 | tee deployment.log)
+          echo "result<<EOF" >> $GITHUB_OUTPUT
+          echo "$deployment_result" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+        env:
+          NOTION_TOKEN: ${{ inputs.notion_token }}
+          CLIENT_NAME: ${{ inputs.client_name }}
+          DEPLOYMENT_TIER: ${{ inputs.deployment_tier }}
+          INCLUDE_SAMPLE_DATA: ${{ inputs.include_sample_data }}
+          CUSTOM_DOMAIN: ${{ inputs.custom_domain }}
+          INTEGRATION_CONFIG: ${{ inputs.integration_config }}
+          
+      - name: Generate Deployment Report
+        run: |
+          npm run report:deployment -- \
+            --output="deployment-report.json" \
+            --format="json"
+            
+      - name: Upload Deployment Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-report-${{ github.run_number }}
+          path: deployment-report.json
+          retention-days: 90
+          
+      - name: Create Success Summary
+        if: success()
+        run: |
+          echo "## 🎉 Deployment Successful!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Client:** ${{ inputs.client_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Tier:** ${{ inputs.deployment_tier }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Timestamp:** $(date)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📊 Deployment Details" >> $GITHUB_STEP_SUMMARY
+          npm run summary:deployment >> $GITHUB_STEP_SUMMARY
+
+  post-deployment:
+    name: 📋 Post-Deployment Tasks
+    runs-on: ubuntu-latest
+    needs: deploy-template
+    if: success()
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          
+      - name: Install Dependencies
+        run: npm ci --production
+        
+      - name: Run Health Checks
+        run: |
+          npm run healthcheck:deployment
+        env:
+          NOTION_TOKEN: ${{ inputs.notion_token }}
+          
+      - name: Configure Monitoring
+        run: |
+          npm run setup:monitoring -- \
+            --client="${{ inputs.client_name }}" \
+            --tier="${{ inputs.deployment_tier }}"
+            
+      - name: Send Success Notification
+        uses: 8398a7/action-slack@v3
+        with:
+          status: success
+          custom_payload: |
+            {
+              "channel": "#deployments",
+              "username": "Construction Bot",
+              "icon_emoji": ":construction:",
+              "attachments": [{
+                "color": "good",
+                "title": "🏗️ Construction Template Deployed",
+                "fields": [
+                  {
+                    "title": "Client",
+                    "value": "${{ inputs.client_name }}",
+                    "short": true
+                  },
+                  {
+                    "title": "Tier",
+                    "value": "${{ inputs.deployment_tier }}",
+                    "short": true
+                  },
+                  {
+                    "title": "Deployment ID",
+                    "value": "${{ github.run_number }}",
+                    "short": true
+                  }
+                ]
+              }]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+        if: env.SLACK_WEBHOOK_URL != ''
+
+  cleanup-on-failure:
+    name: 🧹 Cleanup on Failure
+    runs-on: ubuntu-latest
+    needs: deploy-template
+    if: failure()
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          
+      - name: Install Dependencies
+        run: npm ci --production
+        
+      - name: Cleanup Failed Deployment
+        run: |
+          echo "Cleaning up failed deployment resources..."
+          npm run cleanup:failed || echo "No cleanup script available"
+          
+      - name: Send Failure Notification
+        uses: 8398a7/action-slack@v3
+        with:
+          status: failure
+          text: '❌ Construction template deployment failed for ${{ inputs.client_name }}'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+        if: env.SLACK_WEBHOOK_URL != ''

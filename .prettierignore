@@ -1,0 +1,9 @@
+node_modules/
+coverage/
+dist/
+build/
+logs/
+*.log
+*.md
+package-lock.json
+.git/

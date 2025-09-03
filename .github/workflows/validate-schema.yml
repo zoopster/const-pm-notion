@@ -1,0 +1,104 @@
+name: 🔍 Validate Schema
+
+on:
+  push:
+    branches: [main, develop]
+    paths: ['src/schemas/**', 'configs/**', 'src/api/**']
+  pull_request:
+    branches: [main]
+    paths: ['src/schemas/**', 'configs/**', 'src/api/**']
+
+jobs:
+  validate-schemas:
+    name: Validate Database Schemas
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          
+      - name: Install Dependencies
+        run: npm ci
+        
+      - name: Validate Database Schemas
+        run: npm run validate:schemas
+        
+      - name: Check Schema Compatibility
+        run: npm run test:compatibility
+        
+      - name: Validate Configuration Files
+        run: npm run validate:configs
+        
+      - name: Test Schema Integration
+        run: npm run test:schema:integration
+        
+      - name: Generate Schema Documentation
+        run: npm run docs:schemas
+        
+      - name: Upload Schema Docs
+        uses: actions/upload-artifact@v4
+        with:
+          name: schema-documentation
+          path: docs/generated/schemas/
+          retention-days: 30
+
+  lint-schemas:
+    name: Lint Schema Files
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          
+      - name: Install Dependencies
+        run: npm ci
+        
+      - name: Lint Schema Files
+        run: npm run lint:schemas
+        
+      - name: Check Schema Format
+        run: npm run format:check:schemas
+
+  validate-construction-specific:
+    name: Validate Construction Schema
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          
+      - name: Install Dependencies
+        run: npm ci
+        
+      - name: Validate Construction Database Schema
+        run: npm run validate:construction:schema
+        
+      - name: Test Project Management Schema
+        run: npm run test:pm:schema
+        
+      - name: Validate Material Management Schema
+        run: npm run validate:material:schema
+        
+      - name: Test Client Management Schema
+        run: npm run test:client:schema
+        
+      - name: Generate Schema Summary
+        run: |
+          echo "## Schema Validation Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          npm run schema:summary >> $GITHUB_STEP_SUMMARY

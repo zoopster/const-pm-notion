@@ -1,0 +1,265 @@
+name: 🚀 Release Management
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: 'Release Type'
+        required: true
+        type: choice
+        options: ['patch', 'minor', 'major']
+        default: 'patch'
+      prerelease:
+        description: 'Pre-release'
+        type: boolean
+        default: false
+
+jobs:
+  pre-release-tests:
+    name: Pre-Release Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          
+      - name: Install Dependencies
+        run: npm ci
+        
+      - name: Run Full Test Suite
+        run: npm test
+        
+      - name: Run Security Audit
+        run: npm audit --audit-level moderate
+        
+      - name: Validate All Schemas
+        run: npm run validate:all
+        
+      - name: Build Release Package
+        run: npm run build:release
+
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: pre-release-tests
+    outputs:
+      release-tag: ${{ steps.version.outputs.tag }}
+      release-notes: ${{ steps.changelog.outputs.notes }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          
+      - name: Install Dependencies
+        run: npm ci
+        
+      - name: Configure Git
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          
+      - name: Bump Version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            npm version ${{ inputs.release_type }} --no-git-tag-version
+            NEW_VERSION=$(node -p "require('./package.json').version")
+            echo "tag=v$NEW_VERSION" >> $GITHUB_OUTPUT
+            git add package.json package-lock.json
+            git commit -m "chore: bump version to $NEW_VERSION"
+            git tag "v$NEW_VERSION"
+            git push origin main --tags
+          else
+            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          fi
+          
+      - name: Generate Changelog
+        id: changelog
+        run: |
+          npm run changelog:generate
+          echo "notes<<EOF" >> $GITHUB_OUTPUT
+          cat CHANGELOG.md | head -20 >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
+      - name: Build Release Assets
+        run: |
+          npm run build:release
+          npm run package:templates
+          
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Construction Template ${{ steps.version.outputs.tag }}
+          body: ${{ steps.changelog.outputs.notes }}
+          draft: false
+          prerelease: ${{ inputs.prerelease || false }}
+          files: |
+            dist/construction-template-*.zip
+            dist/schemas/*.json
+            dist/docs/*.pdf
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-npm:
+    name: Publish to NPM
+    runs-on: ubuntu-latest
+    needs: create-release
+    if: ${{ !inputs.prerelease && github.event_name != 'workflow_dispatch' }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          registry-url: 'https://registry.npmjs.org'
+          
+      - name: Install Dependencies
+        run: npm ci
+        
+      - name: Build Package
+        run: npm run build:npm
+        
+      - name: Publish to NPM
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        if: env.NODE_AUTH_TOKEN != ''
+
+  update-documentation:
+    name: Update Documentation
+    needs: create-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          
+      - name: Install Dependencies
+        run: npm ci
+        
+      - name: Generate API Documentation
+        run: npm run docs:api
+        
+      - name: Generate Schema Documentation
+        run: npm run docs:schemas
+        
+      - name: Generate User Guide
+        run: npm run docs:user-guide
+        
+      - name: Build Documentation Site
+        run: npm run docs:build
+        
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./docs/build
+          cname: construction-template.example.com
+        if: github.ref == 'refs/heads/main'
+
+  notify-release:
+    name: Notify Release
+    runs-on: ubuntu-latest
+    needs: [create-release, update-documentation]
+    steps:
+      - name: Send Slack Notification
+        uses: 8398a7/action-slack@v3
+        with:
+          status: success
+          custom_payload: |
+            {
+              "channel": "#releases",
+              "username": "Release Bot",
+              "icon_emoji": ":rocket:",
+              "attachments": [{
+                "color": "good",
+                "title": "🚀 New Construction Template Release",
+                "fields": [
+                  {
+                    "title": "Version",
+                    "value": "${{ needs.create-release.outputs.release-tag }}",
+                    "short": true
+                  },
+                  {
+                    "title": "Repository",
+                    "value": "${{ github.repository }}",
+                    "short": true
+                  },
+                  {
+                    "title": "Release URL",
+                    "value": "${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.create-release.outputs.release-tag }}",
+                    "short": false
+                  }
+                ]
+              }]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+        if: env.SLACK_WEBHOOK_URL != ''
+
+  docker-release:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    needs: create-release
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+        if: env.DOCKER_USERNAME != '' && env.DOCKER_PASSWORD != ''
+        
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKER_USERNAME }}/construction-template
+          tags: |
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+        if: env.DOCKER_USERNAME != '' && env.DOCKER_PASSWORD != ''
